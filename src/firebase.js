@@ -6,12 +6,12 @@ import { getStorage } from 'firebase/storage';
 // TODO: Replace with your Firebase config from Firebase Console
 // Instructions: See FIREBASE_SETUP_GUIDE.md
 const firebaseConfig = {
-  apiKey: "AIzaSyBbRiVD_BsRagZikuX5lL8oKnPsSKu90ws",
+  apiKey: "AIzaSyBbRiVD_BsRagZikuX51L8oKnPsSKu90ws",
   authDomain: "kids-marketplace-ed624.firebaseapp.com",
   projectId: "kids-marketplace-ed624",
   storageBucket: "kids-marketplace-ed624.firebasestorage.app",
   messagingSenderId: "983464077052",
-  appId: "1:983464077052:web:18c578b495713752901979",
+  appId: "1:983464077052:web:18c578b4957137529c1979",
   measurementId: "G-WQPER6HTJP"
 };
 
