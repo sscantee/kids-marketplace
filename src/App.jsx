@@ -50,6 +50,7 @@ const KidsMarketplace = () => {
   const [imagePreview, setImagePreview] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [selectedItem, setSelectedItem] = useState(null);
 
   const categories = [
     { id: 'all', label: 'All Items', icon: '🎪' },
@@ -934,6 +935,7 @@ const KidsMarketplace = () => {
             {filteredListings.map((item, index) => (
               <div
                 key={item.id}
+                onClick={() => setSelectedItem(item)}
                 style={{
                   background: 'white',
                   borderRadius: '25px',
@@ -1137,6 +1139,283 @@ const KidsMarketplace = () => {
         )}
       </div>
 
+      {/* Item Detail Modal */}
+      {selectedItem && (
+        <div
+          onClick={() => setSelectedItem(null)}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 200,
+            padding: '2rem',
+            animation: 'fadeIn 0.3s ease'
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'white',
+              borderRadius: '30px',
+              maxWidth: '700px',
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+              border: '4px solid #ffa06b',
+              animation: 'slideDown 0.4s ease',
+              position: 'relative'
+            }}
+          >
+            <button
+              onClick={() => setSelectedItem(null)}
+              style={{
+                position: 'absolute',
+                top: '1rem',
+                right: '1rem',
+                background: 'white',
+                border: 'none',
+                borderRadius: '50%',
+                width: '40px',
+                height: '40px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                zIndex: 10
+              }}
+            >
+              <X size={20} color="#666" />
+            </button>
+
+            <img
+              src={selectedItem.image}
+              alt={selectedItem.title}
+              style={{
+                width: '100%',
+                height: '350px',
+                objectFit: 'cover',
+                borderRadius: '26px 26px 0 0'
+              }}
+            />
+
+            <div style={{ padding: '2rem' }}>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                marginBottom: '1rem',
+                flexWrap: 'wrap',
+                gap: '1rem'
+              }}>
+                <h2 style={{
+                  color: '#333',
+                  fontSize: '1.8rem',
+                  fontWeight: '700',
+                  margin: 0,
+                  lineHeight: '1.3'
+                }}>
+                  {selectedItem.title}
+                </h2>
+                <div style={{
+                  fontSize: '2.2rem',
+                  fontWeight: '800',
+                  color: '#ff6b9d',
+                  whiteSpace: 'nowrap'
+                }}>
+                  ${typeof selectedItem.price === 'number' ? selectedItem.price.toFixed(2) : selectedItem.price}
+                </div>
+              </div>
+
+              <div style={{
+                display: 'flex',
+                gap: '0.8rem',
+                flexWrap: 'wrap',
+                marginBottom: '1.5rem'
+              }}>
+                <span style={{
+                  background: 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
+                  color: 'white',
+                  padding: '0.4rem 1rem',
+                  borderRadius: '20px',
+                  fontSize: '0.9rem',
+                  fontWeight: '600',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem'
+                }}>
+                  <Tag size={14} />
+                  {selectedItem.condition}
+                </span>
+                <span style={{
+                  background: '#fff0f5',
+                  color: '#ff6b9d',
+                  padding: '0.4rem 1rem',
+                  borderRadius: '20px',
+                  fontSize: '0.9rem',
+                  fontWeight: '600'
+                }}>
+                  {selectedItem.category?.charAt(0).toUpperCase() + selectedItem.category?.slice(1)}
+                </span>
+              </div>
+
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '1rem',
+                marginBottom: '1.5rem'
+              }}>
+                <div style={{
+                  background: '#fff8f0',
+                  padding: '1rem',
+                  borderRadius: '15px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.8rem'
+                }}>
+                  <span style={{ fontSize: '1.5rem' }}>👶</span>
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Age Range</div>
+                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.age}</div>
+                  </div>
+                </div>
+                <div style={{
+                  background: '#fff8f0',
+                  padding: '1rem',
+                  borderRadius: '15px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.8rem'
+                }}>
+                  <MapPin size={20} color="#ff6b9d" />
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Location</div>
+                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.location}</div>
+                  </div>
+                </div>
+                <div style={{
+                  background: '#fff8f0',
+                  padding: '1rem',
+                  borderRadius: '15px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.8rem'
+                }}>
+                  <Clock size={20} color="#ff6b9d" />
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Listed</div>
+                    <div style={{ color: '#333', fontWeight: '600' }}>{formatTimeAgo(selectedItem.createdAt)}</div>
+                  </div>
+                </div>
+                <div style={{
+                  background: '#fff8f0',
+                  padding: '1rem',
+                  borderRadius: '15px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.8rem'
+                }}>
+                  <User size={20} color="#ff6b9d" />
+                  <div>
+                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Seller</div>
+                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.seller?.split('@')[0]}</div>
+                  </div>
+                </div>
+              </div>
+
+              {selectedItem.description && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h3 style={{ color: '#ff6b9d', fontSize: '1.1rem', fontWeight: '700', marginBottom: '0.5rem' }}>
+                    Description
+                  </h3>
+                  <p style={{
+                    color: '#555',
+                    fontSize: '1rem',
+                    lineHeight: '1.6',
+                    margin: 0
+                  }}>
+                    {selectedItem.description}
+                  </p>
+                </div>
+              )}
+
+              {user && selectedItem.sellerId === user.uid && (
+                <div style={{
+                  display: 'flex',
+                  gap: '1rem',
+                  borderTop: '2px solid #f0f0f0',
+                  paddingTop: '1.5rem'
+                }}>
+                  <button
+                    onClick={() => {
+                      handleEdit(selectedItem);
+                      setSelectedItem(null);
+                    }}
+                    style={{
+                      flex: 1,
+                      background: '#4CAF50',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '50px',
+                      padding: '1rem',
+                      fontSize: '1.1rem',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.5rem',
+                      fontFamily: 'inherit',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    <Edit2 size={18} />
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleDelete(selectedItem.id);
+                      setSelectedItem(null);
+                    }}
+                    style={{
+                      flex: 1,
+                      background: '#f44336',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '50px',
+                      padding: '1rem',
+                      fontSize: '1.1rem',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.5rem',
+                      fontFamily: 'inherit',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    <Trash2 size={18} />
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap');
         
@@ -1166,7 +1445,12 @@ const KidsMarketplace = () => {
             transform: translateY(0);
           }
         }
-        
+
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+
         * {
           box-sizing: border-box;
         }
