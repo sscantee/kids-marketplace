@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Plus, Tag, Heart, MapPin, Clock, LogOut, User, Upload, X, Edit2, Trash2 } from 'lucide-react';
-import { auth, db, storage } from './firebase';
+import { auth, db, storage, functions } from './firebase';
+import { httpsCallable } from 'firebase/functions';
 import { 
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword,
@@ -51,6 +52,8 @@ const KidsMarketplace = () => {
   const [uploading, setUploading] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [buyLoading, setBuyLoading] = useState(false);
+  const [paymentMessage, setPaymentMessage] = useState(null);
 
   const categories = [
     { id: 'all', label: 'All Items', icon: '🎪' },
@@ -81,6 +84,26 @@ const KidsMarketplace = () => {
       setLoading(false);
     });
     return () => unsubscribe();
+  }, []);
+
+  // Check for payment status in URL params (after Stripe redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentStatus = params.get('payment');
+
+    if (paymentStatus === 'success') {
+      setPaymentMessage({
+        type: 'success',
+        text: 'Payment successful! The item is now yours. The seller will be notified.'
+      });
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (paymentStatus === 'cancelled') {
+      setPaymentMessage({
+        type: 'cancelled',
+        text: 'Payment was cancelled. The item is still available.'
+      });
+      window.history.replaceState({}, '', window.location.pathname);
+    }
   }, []);
 
   // Auth functions
@@ -163,6 +186,7 @@ const KidsMarketplace = () => {
         image: imageUrl,
         seller: user.email,
         sellerId: user.uid,
+        status: 'available',
         createdAt: serverTimestamp()
       };
 
@@ -235,6 +259,26 @@ const KidsMarketplace = () => {
     setListings(listings.map(item => 
       item.id === id ? { ...item, saved: !item.saved } : item
     ));
+  };
+
+  const handleBuyNow = async (listing) => {
+    if (!user) return;
+    if (listing.sellerId === user.uid) {
+      alert('You cannot buy your own item!');
+      return;
+    }
+
+    setBuyLoading(true);
+    try {
+      const createCheckoutSession = httpsCallable(functions, 'createCheckoutSession');
+      const result = await createCheckoutSession({ listingId: listing.id });
+      window.location.href = result.data.url;
+    } catch (error) {
+      console.error('Error creating checkout session:', error);
+      alert(error.message || 'Failed to start checkout. Please try again.');
+    } finally {
+      setBuyLoading(false);
+    }
   };
 
   const formatTimeAgo = (timestamp) => {
@@ -559,6 +603,43 @@ const KidsMarketplace = () => {
           </div>
         </div>
       </header>
+
+      {/* Payment Status Banner */}
+      {paymentMessage && (
+        <div style={{
+          maxWidth: '1400px',
+          margin: '1rem auto',
+          padding: '0 2rem'
+        }}>
+          <div style={{
+            background: paymentMessage.type === 'success' ? '#d4edda' : '#fff3cd',
+            color: paymentMessage.type === 'success' ? '#155724' : '#856404',
+            border: `2px solid ${paymentMessage.type === 'success' ? '#c3e6cb' : '#ffeeba'}`,
+            borderRadius: '15px',
+            padding: '1rem 1.5rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            fontSize: '1.1rem',
+            fontWeight: '600'
+          }}>
+            <span>{paymentMessage.type === 'success' ? '✅' : '⚠️'} {paymentMessage.text}</span>
+            <button
+              onClick={() => setPaymentMessage(null)}
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '1.2rem',
+                color: 'inherit',
+                fontFamily: 'inherit'
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Category Pills */}
       <div style={{
@@ -967,6 +1048,32 @@ const KidsMarketplace = () => {
                       objectFit: 'cover'
                     }}
                   />
+                  {item.status === 'sold' && (
+                    <div style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      background: 'rgba(0,0,0,0.5)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}>
+                      <span style={{
+                        background: '#f44336',
+                        color: 'white',
+                        padding: '0.8rem 2rem',
+                        borderRadius: '50px',
+                        fontSize: '1.5rem',
+                        fontWeight: '800',
+                        letterSpacing: '2px',
+                        transform: 'rotate(-15deg)'
+                      }}>
+                        SOLD
+                      </span>
+                    </div>
+                  )}
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1343,6 +1450,67 @@ const KidsMarketplace = () => {
                   }}>
                     {selectedItem.description}
                   </p>
+                </div>
+              )}
+
+              {/* Buy Now Button - shown when user is NOT the seller and item is NOT sold */}
+              {user && selectedItem.sellerId !== user.uid && selectedItem.status !== 'sold' && (
+                <div style={{
+                  borderTop: '2px solid #f0f0f0',
+                  paddingTop: '1.5rem',
+                  marginTop: '1rem'
+                }}>
+                  <button
+                    onClick={() => handleBuyNow(selectedItem)}
+                    disabled={buyLoading}
+                    style={{
+                      width: '100%',
+                      background: buyLoading
+                        ? '#ccc'
+                        : 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '50px',
+                      padding: '1.2rem 2rem',
+                      fontSize: '1.3rem',
+                      fontWeight: '700',
+                      cursor: buyLoading ? 'not-allowed' : 'pointer',
+                      boxShadow: '0 6px 20px rgba(76, 175, 80, 0.3)',
+                      transition: 'all 0.3s ease',
+                      fontFamily: 'inherit',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.5rem'
+                    }}
+                    onMouseOver={(e) => {
+                      if (!buyLoading) e.currentTarget.style.transform = 'translateY(-2px)';
+                    }}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    {buyLoading ? '⏳ Preparing checkout...' : '💳 Buy Now'}
+                  </button>
+                </div>
+              )}
+
+              {/* Sold Badge */}
+              {selectedItem.status === 'sold' && (
+                <div style={{
+                  borderTop: '2px solid #f0f0f0',
+                  paddingTop: '1.5rem',
+                  marginTop: '1rem',
+                  textAlign: 'center'
+                }}>
+                  <div style={{
+                    background: '#f0f0f0',
+                    color: '#999',
+                    padding: '1rem',
+                    borderRadius: '50px',
+                    fontSize: '1.2rem',
+                    fontWeight: '700'
+                  }}>
+                    ✅ This item has been sold
+                  </div>
                 </div>
               )}
 
