@@ -1,20 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, Tag, Heart, MapPin, Clock, LogOut, User, Upload, X, Edit2, Trash2 } from 'lucide-react';
+import { Search, Plus, Tag, Heart, MapPin, Clock, LogOut, User, Upload, X, Edit2, Trash2, ShoppingBag } from 'lucide-react';
 import { auth, db, storage, functions } from './firebase';
 import { httpsCallable } from 'firebase/functions';
-import { 
-  createUserWithEmailAndPassword, 
+import {
+  createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
   signOut,
-  onAuthStateChanged 
+  onAuthStateChanged,
+  sendEmailVerification
 } from 'firebase/auth';
-import { 
-  collection, 
-  addDoc, 
-  query, 
-  orderBy, 
+import {
+  collection,
+  addDoc,
+  query,
+  orderBy,
+  where,
   onSnapshot,
   deleteDoc,
   doc,
@@ -23,6 +25,28 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
+const getAuthErrorMessage = (errorCode) => {
+  switch (errorCode) {
+    case 'auth/user-not-found':
+      return 'No account found with this email.';
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return 'Invalid email or password.';
+    case 'auth/email-already-in-use':
+      return 'An account with this email already exists.';
+    case 'auth/weak-password':
+      return 'Password should be at least 6 characters.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please wait and try again.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/network-request-failed':
+      return 'Network error. Please check your connection.';
+    default:
+      return 'Something went wrong. Please try again.';
+  }
+};
+
 const KidsMarketplace = () => {
   const [user, setUser] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -30,14 +54,17 @@ const KidsMarketplace = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  
+  const [verificationSent, setVerificationSent] = useState(false);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [showAddForm, setShowAddForm] = useState(false);
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
-  
-  // Form state
+  const [showMyListings, setShowMyListings] = useState(false);
+  const [purchases, setPurchases] = useState([]);
+  const [showPurchases, setShowPurchases] = useState(false);
+
   const [formData, setFormData] = useState({
     title: '',
     price: '',
@@ -56,11 +83,17 @@ const KidsMarketplace = () => {
   const [paymentMessage, setPaymentMessage] = useState(null);
 
   const categories = [
-    { id: 'all', label: 'All Items', icon: '🎪' },
-    { id: 'toys', label: 'Toys', icon: '🧸' },
-    { id: 'clothes', label: 'Clothes', icon: '👕' },
-    { id: 'accessories', label: 'Accessories', icon: '🎒' }
+    { id: 'all', label: 'All Items' },
+    { id: 'toys', label: 'Toys' },
+    { id: 'clothes', label: 'Clothes' },
+    { id: 'accessories', label: 'Accessories' }
   ];
+
+  const getSellerDisplayName = () => {
+    if (!user) return '';
+    if (user.displayName) return user.displayName;
+    return user.email.split('@')[0];
+  };
 
   // Auth state listener
   useEffect(() => {
@@ -86,18 +119,34 @@ const KidsMarketplace = () => {
     return () => unsubscribe();
   }, []);
 
+  // Purchases listener
+  useEffect(() => {
+    if (!user) { setPurchases([]); return; }
+    const q = query(
+      collection(db, 'transactions'),
+      where('buyerId', '==', user.uid)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setPurchases(data);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
   // Check for payment status in URL params (after Stripe redirect)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const paymentStatus = params.get('payment');
 
     if (paymentStatus === 'success') {
+      localStorage.removeItem('pendingPurchase');
       setPaymentMessage({
         type: 'success',
         text: 'Payment successful! The item is now yours. The seller will be notified.'
       });
       window.history.replaceState({}, '', window.location.pathname);
     } else if (paymentStatus === 'cancelled') {
+      localStorage.removeItem('pendingPurchase');
       setPaymentMessage({
         type: 'cancelled',
         text: 'Payment was cancelled. The item is still available.'
@@ -110,17 +159,20 @@ const KidsMarketplace = () => {
   const handleEmailAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
+    setVerificationSent(false);
     try {
       if (isLogin) {
         await signInWithEmailAndPassword(auth, email, password);
       } else {
-        await createUserWithEmailAndPassword(auth, email, password);
+        const result = await createUserWithEmailAndPassword(auth, email, password);
+        await sendEmailVerification(result.user);
+        setVerificationSent(true);
+        setTimeout(() => setVerificationSent(false), 5000);
       }
-      setShowAuthModal(false);
       setEmail('');
       setPassword('');
     } catch (error) {
-      setAuthError(error.message);
+      setAuthError(getAuthErrorMessage(error.code));
     }
   };
 
@@ -131,7 +183,7 @@ const KidsMarketplace = () => {
       await signInWithPopup(auth, provider);
       setShowAuthModal(false);
     } catch (error) {
-      setAuthError(error.message);
+      setAuthError(getAuthErrorMessage(error.code));
     }
   };
 
@@ -171,11 +223,11 @@ const KidsMarketplace = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!user) return;
-    
+
     setUploading(true);
     try {
       let imageUrl = 'https://images.unsplash.com/photo-1558060370-d644479cb6f7?w=400&h=400&fit=crop';
-      
+
       if (imageFile) {
         imageUrl = await uploadImage(imageFile);
       }
@@ -186,6 +238,7 @@ const KidsMarketplace = () => {
         image: imageUrl,
         seller: user.email,
         sellerId: user.uid,
+        sellerDisplayName: getSellerDisplayName(),
         status: 'available',
         createdAt: serverTimestamp()
       };
@@ -199,7 +252,6 @@ const KidsMarketplace = () => {
         await addDoc(collection(db, 'listings'), listingData);
       }
 
-      // Reset form
       setFormData({
         title: '',
         price: '',
@@ -248,19 +300,6 @@ const KidsMarketplace = () => {
     }
   };
 
-  const filteredListings = listings.filter(item => {
-    const matchesCategory = selectedCategory === 'all' || item.category === selectedCategory;
-    const matchesSearch = item.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          item.category?.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesCategory && matchesSearch;
-  });
-
-  const toggleSave = (id) => {
-    setListings(listings.map(item => 
-      item.id === id ? { ...item, saved: !item.saved } : item
-    ));
-  };
-
   const handleBuyNow = async (listing) => {
     if (!user) return;
     if (listing.sellerId === user.uid) {
@@ -270,22 +309,44 @@ const KidsMarketplace = () => {
 
     setBuyLoading(true);
     try {
+      localStorage.setItem('pendingPurchase', JSON.stringify({
+        listingId: listing.id,
+        title: listing.title,
+        price: listing.price
+      }));
       const createCheckoutSession = httpsCallable(functions, 'createCheckoutSession');
       const result = await createCheckoutSession({ listingId: listing.id });
       window.location.href = result.data.url;
     } catch (error) {
       console.error('Error creating checkout session:', error);
+      localStorage.removeItem('pendingPurchase');
       alert(error.message || 'Failed to start checkout. Please try again.');
     } finally {
       setBuyLoading(false);
     }
   };
 
+  const filteredListings = listings.filter(item => {
+    if (showMyListings && user) {
+      if (item.sellerId !== user.uid) return false;
+    }
+    const matchesCategory = selectedCategory === 'all' || item.category === selectedCategory;
+    const matchesSearch = item.title?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                          item.category?.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesCategory && matchesSearch;
+  });
+
+  const toggleSave = (id) => {
+    setListings(listings.map(item =>
+      item.id === id ? { ...item, saved: !item.saved } : item
+    ));
+  };
+
   const formatTimeAgo = (timestamp) => {
     if (!timestamp) return 'Just now';
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
     const seconds = Math.floor((new Date() - date) / 1000);
-    
+
     if (seconds < 60) return 'Just now';
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
@@ -293,50 +354,54 @@ const KidsMarketplace = () => {
     return `${Math.floor(seconds / 604800)}w ago`;
   };
 
+  const displaySellerName = (item) => {
+    return item.sellerDisplayName || item.seller?.split('@')[0] || 'Unknown';
+  };
+
   // Auth Modal
   if (showAuthModal) {
     return (
       <div style={{
         minHeight: '100vh',
-        background: 'linear-gradient(135deg, #fef5e7 0%, #fdecd1 50%, #fce5cd 100%)',
+        background: '#faf8f5',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: '2rem',
-        fontFamily: '"Fredoka", "Comic Neue", sans-serif'
+        fontFamily: '"DM Sans", sans-serif'
       }}>
         <div style={{
           background: 'white',
-          borderRadius: '30px',
-          padding: '3rem',
-          maxWidth: '450px',
+          borderRadius: '14px',
+          padding: '2.5rem',
+          maxWidth: '420px',
           width: '100%',
-          boxShadow: '0 20px 60px rgba(255, 107, 157, 0.3)',
-          border: '4px solid #ffa06b'
+          boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
+          border: '1px solid #e0dbd4'
         }}>
           <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-            <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🎠</div>
             <h1 style={{
-              color: '#ff6b9d',
-              fontSize: '2rem',
+              color: '#2d2d2d',
+              fontSize: '1.6rem',
               fontWeight: '700',
-              marginBottom: '0.5rem'
+              marginBottom: '0.4rem'
             }}>
-              Welcome to Little Treasures
+              Little Treasures
             </h1>
-            <p style={{ color: '#666', fontSize: '1.1rem' }}>
+            <p style={{ color: '#6b6b6b', fontSize: '0.95rem', margin: 0 }}>
               {isLogin ? 'Sign in to your account' : 'Create your account'}
             </p>
           </div>
 
           {authError && (
             <div style={{
-              background: '#ffe5e5',
-              color: '#cc0000',
-              padding: '1rem',
+              background: '#f9e6e6',
+              color: '#c45c5c',
+              padding: '0.8rem 1rem',
               borderRadius: '10px',
               marginBottom: '1rem',
-              fontSize: '0.9rem'
+              fontSize: '0.9rem',
+              border: '1px solid #e8c4c4'
             }}>
               {authError}
             </div>
@@ -351,14 +416,17 @@ const KidsMarketplace = () => {
               required
               style={{
                 width: '100%',
-                padding: '1rem',
-                marginBottom: '1rem',
-                fontSize: '1rem',
-                border: '3px solid #ffd4e5',
-                borderRadius: '15px',
+                padding: '0.9rem 1rem',
+                marginBottom: '0.8rem',
+                fontSize: '0.95rem',
+                border: '1px solid #e0dbd4',
+                borderRadius: '10px',
                 outline: 'none',
-                fontFamily: 'inherit'
+                background: 'white',
+                color: '#2d2d2d'
               }}
+              onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+              onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
             />
             <input
               type="password"
@@ -368,45 +436,48 @@ const KidsMarketplace = () => {
               required
               style={{
                 width: '100%',
-                padding: '1rem',
-                marginBottom: '1.5rem',
-                fontSize: '1rem',
-                border: '3px solid #ffd4e5',
-                borderRadius: '15px',
+                padding: '0.9rem 1rem',
+                marginBottom: '1.2rem',
+                fontSize: '0.95rem',
+                border: '1px solid #e0dbd4',
+                borderRadius: '10px',
                 outline: 'none',
-                fontFamily: 'inherit'
+                background: 'white',
+                color: '#2d2d2d'
               }}
+              onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+              onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
             />
             <button
               type="submit"
               style={{
                 width: '100%',
-                background: 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
+                background: '#5c7a5a',
                 color: 'white',
                 border: 'none',
-                borderRadius: '50px',
-                padding: '1.2rem',
-                fontSize: '1.1rem',
+                borderRadius: '10px',
+                padding: '0.9rem',
+                fontSize: '1rem',
                 fontWeight: '600',
                 cursor: 'pointer',
-                boxShadow: '0 6px 20px rgba(255, 107, 157, 0.3)',
-                fontFamily: 'inherit',
-                transition: 'transform 0.2s'
+                transition: 'background 0.2s'
               }}
-              onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-              onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+              onMouseOver={(e) => e.currentTarget.style.background = '#4a6849'}
+              onMouseOut={(e) => e.currentTarget.style.background = '#5c7a5a'}
             >
-              {isLogin ? '🔑 Sign In' : '✨ Create Account'}
+              {isLogin ? 'Sign In' : 'Create Account'}
             </button>
           </form>
 
           <div style={{
             textAlign: 'center',
-            color: '#999',
+            color: '#9a958e',
             marginBottom: '1rem',
-            fontSize: '0.9rem'
+            fontSize: '0.85rem',
+            textTransform: 'uppercase',
+            letterSpacing: '1px'
           }}>
-            OR
+            or
           </div>
 
           <button
@@ -414,30 +485,23 @@ const KidsMarketplace = () => {
             style={{
               width: '100%',
               background: 'white',
-              color: '#333',
-              border: '3px solid #ffd4e5',
-              borderRadius: '50px',
-              padding: '1.2rem',
-              fontSize: '1.1rem',
-              fontWeight: '600',
+              color: '#2d2d2d',
+              border: '1px solid #e0dbd4',
+              borderRadius: '10px',
+              padding: '0.9rem',
+              fontSize: '0.95rem',
+              fontWeight: '500',
               cursor: 'pointer',
-              fontFamily: 'inherit',
               marginBottom: '1.5rem',
-              transition: 'all 0.2s'
+              transition: 'border-color 0.2s'
             }}
-            onMouseOver={(e) => {
-              e.currentTarget.style.borderColor = '#ff6b9d';
-              e.currentTarget.style.transform = 'translateY(-2px)';
-            }}
-            onMouseOut={(e) => {
-              e.currentTarget.style.borderColor = '#ffd4e5';
-              e.currentTarget.style.transform = 'translateY(0)';
-            }}
+            onMouseOver={(e) => e.currentTarget.style.borderColor = '#5c7a5a'}
+            onMouseOut={(e) => e.currentTarget.style.borderColor = '#e0dbd4'}
           >
-            🔍 Continue with Google
+            Continue with Google
           </button>
 
-          <div style={{ textAlign: 'center', fontSize: '0.95rem', color: '#666' }}>
+          <div style={{ textAlign: 'center', fontSize: '0.9rem', color: '#6b6b6b' }}>
             {isLogin ? "Don't have an account? " : "Already have an account? "}
             <button
               onClick={() => {
@@ -447,12 +511,11 @@ const KidsMarketplace = () => {
               style={{
                 background: 'none',
                 border: 'none',
-                color: '#ff6b9d',
+                color: '#5c7a5a',
                 fontWeight: '600',
                 cursor: 'pointer',
                 textDecoration: 'underline',
-                fontFamily: 'inherit',
-                fontSize: '0.95rem'
+                fontSize: '0.9rem'
               }}
             >
               {isLogin ? 'Sign up' : 'Sign in'}
@@ -466,245 +529,300 @@ const KidsMarketplace = () => {
   return (
     <div style={{
       minHeight: '100vh',
-      background: 'linear-gradient(135deg, #fef5e7 0%, #fdecd1 50%, #fce5cd 100%)',
-      fontFamily: '"Fredoka", "Comic Neue", sans-serif'
+      background: '#faf8f5',
+      fontFamily: '"DM Sans", sans-serif'
     }}>
       {/* Header */}
       <header style={{
-        background: 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
-        padding: '2rem',
-        boxShadow: '0 8px 32px rgba(255, 107, 157, 0.3)',
+        background: 'white',
+        padding: '1.2rem 2rem',
+        borderBottom: '1px solid #e0dbd4',
         position: 'sticky',
         top: 0,
-        zIndex: 100,
-        borderBottom: '4px solid #ff8fb0'
+        zIndex: 100
       }}>
         <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-              <div style={{
-                fontSize: '3rem',
-                animation: 'bounce 2s infinite',
-                filter: 'drop-shadow(2px 2px 4px rgba(0,0,0,0.2))'
-              }}>🎠</div>
-              <h1 style={{
-                color: 'white',
-                fontSize: '2.5rem',
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.8rem' }}>
+            <h1
+              style={{
+                color: '#2d2d2d',
+                fontSize: '1.5rem',
                 fontWeight: '700',
                 margin: 0,
-                textShadow: '3px 3px 0px rgba(0,0,0,0.1)',
-                letterSpacing: '1px'
-              }}>
-                Little Treasures
-              </h1>
-            </div>
-            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
-              <div style={{
-                background: 'rgba(255,255,255,0.2)',
-                padding: '0.8rem 1.5rem',
-                borderRadius: '50px',
-                color: 'white',
+                cursor: 'pointer'
+              }}
+              onClick={() => { setShowMyListings(false); setShowPurchases(false); }}
+            >
+              Little Treasures
+            </h1>
+            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap' }}>
+              <span style={{
+                color: '#6b6b6b',
+                fontSize: '0.85rem',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '0.5rem'
+                gap: '0.4rem'
               }}>
-                <User size={18} />
-                <span style={{ fontSize: '0.95rem' }}>{user?.email}</span>
-              </div>
+                <User size={15} />
+                {user?.displayName || user?.email?.split('@')[0]}
+              </span>
               <button
-                onClick={() => setShowAddForm(!showAddForm)}
+                onClick={() => { setShowMyListings(!showMyListings); setShowPurchases(false); }}
                 style={{
-                  background: 'white',
-                  color: '#ff6b9d',
+                  background: showMyListings ? '#5c7a5a' : 'white',
+                  color: showMyListings ? 'white' : '#6b6b6b',
+                  border: showMyListings ? 'none' : '1px solid #e0dbd4',
+                  borderRadius: '10px',
+                  padding: '0.6rem 1rem',
+                  fontSize: '0.85rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                My Listings
+              </button>
+              <button
+                onClick={() => { setShowPurchases(!showPurchases); setShowMyListings(false); }}
+                style={{
+                  background: showPurchases ? '#5c7a5a' : 'white',
+                  color: showPurchases ? 'white' : '#6b6b6b',
+                  border: showPurchases ? 'none' : '1px solid #e0dbd4',
+                  borderRadius: '10px',
+                  padding: '0.6rem 1rem',
+                  fontSize: '0.85rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <ShoppingBag size={14} />
+                Purchases
+              </button>
+              <button
+                onClick={() => { setShowAddForm(!showAddForm); setShowPurchases(false); }}
+                style={{
+                  background: '#5c7a5a',
+                  color: 'white',
                   border: 'none',
-                  borderRadius: '50px',
-                  padding: '1rem 2rem',
-                  fontSize: '1.1rem',
+                  borderRadius: '10px',
+                  padding: '0.6rem 1.2rem',
+                  fontSize: '0.85rem',
                   fontWeight: '600',
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.5rem',
-                  boxShadow: '0 6px 20px rgba(0,0,0,0.15)',
-                  transition: 'all 0.3s ease',
-                  fontFamily: 'inherit'
+                  gap: '0.3rem',
+                  transition: 'background 0.2s'
                 }}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-3px) scale(1.05)';
-                  e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.25)';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.transform = 'translateY(0) scale(1)';
-                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(0,0,0,0.15)';
-                }}
+                onMouseOver={(e) => e.currentTarget.style.background = '#4a6849'}
+                onMouseOut={(e) => e.currentTarget.style.background = '#5c7a5a'}
               >
-                <Plus size={20} />
+                <Plus size={16} />
                 Sell Item
               </button>
               <button
                 onClick={handleLogout}
                 style={{
-                  background: 'rgba(255,255,255,0.2)',
-                  color: 'white',
-                  border: '2px solid white',
-                  borderRadius: '50%',
-                  width: '50px',
-                  height: '50px',
+                  background: 'white',
+                  color: '#6b6b6b',
+                  border: '1px solid #e0dbd4',
+                  borderRadius: '10px',
+                  width: '38px',
+                  height: '38px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   cursor: 'pointer',
-                  transition: 'all 0.3s ease'
+                  transition: 'border-color 0.2s'
                 }}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.background = 'white';
-                  e.currentTarget.style.color = '#ff6b9d';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.background = 'rgba(255,255,255,0.2)';
-                  e.currentTarget.style.color = 'white';
-                }}
+                onMouseOver={(e) => e.currentTarget.style.borderColor = '#c45c5c'}
+                onMouseOut={(e) => e.currentTarget.style.borderColor = '#e0dbd4'}
               >
-                <LogOut size={20} />
+                <LogOut size={16} />
               </button>
             </div>
           </div>
 
           {/* Search Bar */}
-          <div style={{ position: 'relative' }}>
-            <Search 
-              size={22} 
-              style={{
-                position: 'absolute',
-                left: '1.5rem',
-                top: '50%',
-                transform: 'translateY(-50%)',
-                color: '#ff6b9d',
-                pointerEvents: 'none'
-              }}
-            />
-            <input
-              type="text"
-              placeholder="Search for toys, clothes, accessories..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '1.2rem 1.5rem 1.2rem 4rem',
-                fontSize: '1.1rem',
-                border: 'none',
-                borderRadius: '50px',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.1)',
-                outline: 'none',
-                fontFamily: 'inherit',
-                background: 'white'
-              }}
-            />
-          </div>
+          {!showPurchases && (
+            <div style={{ position: 'relative' }}>
+              <Search
+                size={18}
+                style={{
+                  position: 'absolute',
+                  left: '1rem',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  color: '#9a958e',
+                  pointerEvents: 'none'
+                }}
+              />
+              <input
+                type="text"
+                placeholder="Search for toys, clothes, accessories..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '0.8rem 1rem 0.8rem 2.8rem',
+                  fontSize: '0.95rem',
+                  border: '1px solid #e0dbd4',
+                  borderRadius: '10px',
+                  outline: 'none',
+                  background: '#faf8f5',
+                  color: '#2d2d2d'
+                }}
+                onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
+              />
+            </div>
+          )}
         </div>
       </header>
+
+      {/* Verification Email Banner */}
+      {verificationSent && (
+        <div style={{
+          maxWidth: '1400px',
+          margin: '1rem auto 0',
+          padding: '0 2rem'
+        }}>
+          <div style={{
+            background: '#e8f0e8',
+            color: '#3a5a3a',
+            border: '1px solid #c0d4c0',
+            borderRadius: '10px',
+            padding: '0.8rem 1.2rem',
+            fontSize: '0.9rem',
+            fontWeight: '500'
+          }}>
+            Account created! Check your inbox to verify your email.
+          </div>
+        </div>
+      )}
+
+      {/* Unverified Email Reminder */}
+      {user && !user.emailVerified && !verificationSent && (
+        <div style={{
+          maxWidth: '1400px',
+          margin: '1rem auto 0',
+          padding: '0 2rem'
+        }}>
+          <div style={{
+            background: '#f5f0eb',
+            color: '#6b6b6b',
+            border: '1px solid #e0dbd4',
+            borderRadius: '10px',
+            padding: '0.8rem 1.2rem',
+            fontSize: '0.85rem'
+          }}>
+            Please verify your email address. Check your inbox for a verification link.
+          </div>
+        </div>
+      )}
 
       {/* Payment Status Banner */}
       {paymentMessage && (
         <div style={{
           maxWidth: '1400px',
-          margin: '1rem auto',
+          margin: '1rem auto 0',
           padding: '0 2rem'
         }}>
           <div style={{
-            background: paymentMessage.type === 'success' ? '#d4edda' : '#fff3cd',
-            color: paymentMessage.type === 'success' ? '#155724' : '#856404',
-            border: `2px solid ${paymentMessage.type === 'success' ? '#c3e6cb' : '#ffeeba'}`,
-            borderRadius: '15px',
-            padding: '1rem 1.5rem',
+            background: paymentMessage.type === 'success' ? '#e8f0e8' : '#f5f0eb',
+            color: paymentMessage.type === 'success' ? '#3a5a3a' : '#8b7355',
+            border: `1px solid ${paymentMessage.type === 'success' ? '#c0d4c0' : '#e0dbd4'}`,
+            borderRadius: '10px',
+            padding: '0.8rem 1.2rem',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            fontSize: '1.1rem',
-            fontWeight: '600'
+            fontSize: '0.95rem',
+            fontWeight: '500'
           }}>
-            <span>{paymentMessage.type === 'success' ? '✅' : '⚠️'} {paymentMessage.text}</span>
+            <span>{paymentMessage.text}</span>
             <button
               onClick={() => setPaymentMessage(null)}
               style={{
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
-                fontSize: '1.2rem',
                 color: 'inherit',
-                fontFamily: 'inherit'
+                padding: '0.2rem',
+                lineHeight: 1
               }}
             >
-              ✕
+              <X size={16} />
             </button>
           </div>
         </div>
       )}
 
       {/* Category Pills */}
-      <div style={{
-        maxWidth: '1400px',
-        margin: '2rem auto',
-        padding: '0 2rem'
-      }}>
+      {!showPurchases && (
         <div style={{
-          display: 'flex',
-          gap: '1rem',
-          flexWrap: 'wrap',
-          justifyContent: 'center'
+          maxWidth: '1400px',
+          margin: '1.5rem auto',
+          padding: '0 2rem'
         }}>
-          {categories.map(cat => (
-            <button
-              key={cat.id}
-              onClick={() => setSelectedCategory(cat.id)}
-              style={{
-                background: selectedCategory === cat.id 
-                  ? 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)'
-                  : 'white',
-                color: selectedCategory === cat.id ? 'white' : '#ff6b9d',
-                border: selectedCategory === cat.id ? 'none' : '3px solid #ff6b9d',
-                borderRadius: '50px',
-                padding: '1rem 2rem',
-                fontSize: '1.1rem',
-                fontWeight: '600',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                transition: 'all 0.3s ease',
-                boxShadow: selectedCategory === cat.id 
-                  ? '0 6px 20px rgba(255, 107, 157, 0.3)'
-                  : '0 4px 12px rgba(0,0,0,0.1)',
-                fontFamily: 'inherit'
-              }}
-              onMouseOver={(e) => {
-                e.currentTarget.style.transform = 'translateY(-3px) scale(1.05)';
-              }}
-              onMouseOut={(e) => {
-                e.currentTarget.style.transform = 'translateY(0) scale(1)';
-              }}
-            >
-              <span style={{ fontSize: '1.5rem' }}>{cat.icon}</span>
-              {cat.label}
-            </button>
-          ))}
+          <div style={{
+            display: 'flex',
+            gap: '0.6rem',
+            flexWrap: 'wrap'
+          }}>
+            {categories.map(cat => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedCategory(cat.id)}
+                style={{
+                  background: selectedCategory === cat.id ? '#5c7a5a' : 'white',
+                  color: selectedCategory === cat.id ? 'white' : '#6b6b6b',
+                  border: selectedCategory === cat.id ? 'none' : '1px solid #e0dbd4',
+                  borderRadius: '10px',
+                  padding: '0.6rem 1.2rem',
+                  fontSize: '0.9rem',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+                onMouseOver={(e) => {
+                  if (selectedCategory !== cat.id) {
+                    e.currentTarget.style.borderColor = '#5c7a5a';
+                    e.currentTarget.style.color = '#5c7a5a';
+                  }
+                }}
+                onMouseOut={(e) => {
+                  if (selectedCategory !== cat.id) {
+                    e.currentTarget.style.borderColor = '#e0dbd4';
+                    e.currentTarget.style.color = '#6b6b6b';
+                  }
+                }}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Add/Edit Listing Form */}
       {showAddForm && (
         <div style={{
-          maxWidth: '800px',
-          margin: '2rem auto',
+          maxWidth: '700px',
+          margin: '1.5rem auto',
           padding: '0 2rem'
         }}>
           <div style={{
             background: 'white',
-            borderRadius: '30px',
-            padding: '2.5rem',
-            boxShadow: '0 12px 40px rgba(255, 107, 157, 0.2)',
-            border: '4px solid #ffa06b',
-            animation: 'slideDown 0.4s ease',
+            borderRadius: '14px',
+            padding: '2rem',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+            border: '1px solid #e0dbd4',
+            animation: 'slideDown 0.3s ease',
             position: 'relative'
           }}>
             <button
@@ -725,42 +843,41 @@ const KidsMarketplace = () => {
               }}
               style={{
                 position: 'absolute',
-                top: '1.5rem',
-                right: '1.5rem',
+                top: '1.2rem',
+                right: '1.2rem',
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
-                color: '#999',
-                padding: '0.5rem'
+                color: '#9a958e',
+                padding: '0.3rem'
               }}
             >
-              <X size={24} />
+              <X size={20} />
             </button>
             <h2 style={{
-              color: '#ff6b9d',
-              fontSize: '2rem',
-              fontWeight: '700',
-              marginBottom: '1.5rem',
-              textAlign: 'center'
+              color: '#2d2d2d',
+              fontSize: '1.3rem',
+              fontWeight: '600',
+              marginBottom: '1.5rem'
             }}>
-              {editingId ? '✏️ Edit Your Item' : '✨ List Your Item'}
+              {editingId ? 'Edit Your Item' : 'List Your Item'}
             </h2>
-            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+            <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
               {/* Image Upload */}
               <div>
-                <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                   Product Photo
                 </label>
                 <div style={{
-                  border: '3px dashed #ffd4e5',
-                  borderRadius: '15px',
-                  padding: '2rem',
+                  border: '1px dashed #e0dbd4',
+                  borderRadius: '10px',
+                  padding: '1.5rem',
                   textAlign: 'center',
                   cursor: 'pointer',
-                  transition: 'all 0.3s'
+                  transition: 'border-color 0.2s'
                 }}
-                onMouseOver={(e) => e.currentTarget.style.borderColor = '#ff6b9d'}
-                onMouseOut={(e) => e.currentTarget.style.borderColor = '#ffd4e5'}
+                onMouseOver={(e) => e.currentTarget.style.borderColor = '#5c7a5a'}
+                onMouseOut={(e) => e.currentTarget.style.borderColor = '#e0dbd4'}
                 >
                   <input
                     type="file"
@@ -773,16 +890,16 @@ const KidsMarketplace = () => {
                     {imagePreview ? (
                       <img src={imagePreview} alt="Preview" style={{
                         maxWidth: '100%',
-                        maxHeight: '200px',
-                        borderRadius: '10px'
+                        maxHeight: '180px',
+                        borderRadius: '8px'
                       }} />
                     ) : (
                       <div>
-                        <Upload size={48} color="#ff6b9d" style={{ marginBottom: '1rem' }} />
-                        <p style={{ color: '#ff6b9d', fontWeight: '600' }}>
+                        <Upload size={36} color="#9a958e" style={{ marginBottom: '0.5rem' }} />
+                        <p style={{ color: '#6b6b6b', fontWeight: '500', margin: '0 0 0.3rem 0', fontSize: '0.9rem' }}>
                           Click to upload image
                         </p>
-                        <p style={{ color: '#999', fontSize: '0.9rem' }}>
+                        <p style={{ color: '#9a958e', fontSize: '0.8rem', margin: 0 }}>
                           JPG, PNG, or GIF (max 5MB)
                         </p>
                       </div>
@@ -792,7 +909,7 @@ const KidsMarketplace = () => {
               </div>
 
               <div>
-                <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                   Item Title *
                 </label>
                 <input
@@ -804,19 +921,21 @@ const KidsMarketplace = () => {
                   required
                   style={{
                     width: '100%',
-                    padding: '1rem',
-                    fontSize: '1rem',
-                    border: '3px solid #ffd4e5',
-                    borderRadius: '15px',
+                    padding: '0.8rem 1rem',
+                    fontSize: '0.95rem',
+                    border: '1px solid #e0dbd4',
+                    borderRadius: '10px',
                     outline: 'none',
-                    fontFamily: 'inherit'
+                    color: '#2d2d2d'
                   }}
+                  onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                  onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
                 />
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.2rem' }}>
                 <div>
-                  <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
-                    Price ($) *
+                  <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
+                    Price (&euro;) *
                   </label>
                   <input
                     type="number"
@@ -829,31 +948,34 @@ const KidsMarketplace = () => {
                     step="0.01"
                     style={{
                       width: '100%',
-                      padding: '1rem',
-                      fontSize: '1rem',
-                      border: '3px solid #ffd4e5',
-                      borderRadius: '15px',
+                      padding: '0.8rem 1rem',
+                      fontSize: '0.95rem',
+                      border: '1px solid #e0dbd4',
+                      borderRadius: '10px',
                       outline: 'none',
-                      fontFamily: 'inherit'
+                      color: '#2d2d2d'
                     }}
+                    onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                    onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                  <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                     Category *
                   </label>
-                  <select 
+                  <select
                     name="category"
                     value={formData.category}
                     onChange={handleInputChange}
                     style={{
                       width: '100%',
-                      padding: '1rem',
-                      fontSize: '1rem',
-                      border: '3px solid #ffd4e5',
-                      borderRadius: '15px',
+                      padding: '0.8rem 1rem',
+                      fontSize: '0.95rem',
+                      border: '1px solid #e0dbd4',
+                      borderRadius: '10px',
                       outline: 'none',
-                      fontFamily: 'inherit'
+                      color: '#2d2d2d',
+                      background: 'white'
                     }}
                   >
                     <option value="toys">Toys</option>
@@ -862,9 +984,9 @@ const KidsMarketplace = () => {
                   </select>
                 </div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.2rem' }}>
                 <div>
-                  <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                  <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                     Condition *
                   </label>
                   <select
@@ -873,12 +995,13 @@ const KidsMarketplace = () => {
                     onChange={handleInputChange}
                     style={{
                       width: '100%',
-                      padding: '1rem',
-                      fontSize: '1rem',
-                      border: '3px solid #ffd4e5',
-                      borderRadius: '15px',
+                      padding: '0.8rem 1rem',
+                      fontSize: '0.95rem',
+                      border: '1px solid #e0dbd4',
+                      borderRadius: '10px',
                       outline: 'none',
-                      fontFamily: 'inherit'
+                      color: '#2d2d2d',
+                      background: 'white'
                     }}
                   >
                     <option>Like New</option>
@@ -888,7 +1011,7 @@ const KidsMarketplace = () => {
                   </select>
                 </div>
                 <div>
-                  <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                  <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                     Age Range *
                   </label>
                   <input
@@ -900,18 +1023,20 @@ const KidsMarketplace = () => {
                     required
                     style={{
                       width: '100%',
-                      padding: '1rem',
-                      fontSize: '1rem',
-                      border: '3px solid #ffd4e5',
-                      borderRadius: '15px',
+                      padding: '0.8rem 1rem',
+                      fontSize: '0.95rem',
+                      border: '1px solid #e0dbd4',
+                      borderRadius: '10px',
                       outline: 'none',
-                      fontFamily: 'inherit'
+                      color: '#2d2d2d'
                     }}
+                    onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                    onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
                   />
                 </div>
               </div>
               <div>
-                <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                   Location *
                 </label>
                 <input
@@ -919,21 +1044,23 @@ const KidsMarketplace = () => {
                   name="location"
                   value={formData.location}
                   onChange={handleInputChange}
-                  placeholder="City, State"
+                  placeholder="City, Country"
                   required
                   style={{
                     width: '100%',
-                    padding: '1rem',
-                    fontSize: '1rem',
-                    border: '3px solid #ffd4e5',
-                    borderRadius: '15px',
+                    padding: '0.8rem 1rem',
+                    fontSize: '0.95rem',
+                    border: '1px solid #e0dbd4',
+                    borderRadius: '10px',
                     outline: 'none',
-                    fontFamily: 'inherit'
+                    color: '#2d2d2d'
                   }}
+                  onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                  onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
                 />
               </div>
               <div>
-                <label style={{ display: 'block', color: '#ff6b9d', fontWeight: '600', marginBottom: '0.5rem' }}>
+                <label style={{ display: 'block', color: '#2d2d2d', fontWeight: '500', marginBottom: '0.4rem', fontSize: '0.9rem' }}>
                   Description
                 </label>
                 <textarea
@@ -941,308 +1068,368 @@ const KidsMarketplace = () => {
                   value={formData.description}
                   onChange={handleInputChange}
                   placeholder="Tell us about your item..."
-                  rows="4"
+                  rows="3"
                   style={{
                     width: '100%',
-                    padding: '1rem',
-                    fontSize: '1rem',
-                    border: '3px solid #ffd4e5',
-                    borderRadius: '15px',
+                    padding: '0.8rem 1rem',
+                    fontSize: '0.95rem',
+                    border: '1px solid #e0dbd4',
+                    borderRadius: '10px',
                     outline: 'none',
-                    fontFamily: 'inherit',
+                    color: '#2d2d2d',
                     resize: 'vertical'
                   }}
+                  onFocus={(e) => e.target.style.borderColor = '#5c7a5a'}
+                  onBlur={(e) => e.target.style.borderColor = '#e0dbd4'}
                 />
               </div>
               <button
                 type="submit"
                 disabled={uploading}
                 style={{
-                  background: uploading 
-                    ? '#ccc' 
-                    : 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
+                  background: uploading ? '#9a958e' : '#5c7a5a',
                   color: 'white',
                   border: 'none',
-                  borderRadius: '50px',
-                  padding: '1.2rem 2rem',
-                  fontSize: '1.2rem',
+                  borderRadius: '10px',
+                  padding: '0.9rem',
+                  fontSize: '1rem',
                   fontWeight: '600',
                   cursor: uploading ? 'not-allowed' : 'pointer',
-                  boxShadow: '0 6px 20px rgba(255, 107, 157, 0.3)',
-                  transition: 'all 0.3s ease',
-                  fontFamily: 'inherit'
+                  transition: 'background 0.2s'
                 }}
                 onMouseOver={(e) => {
-                  if (!uploading) {
-                    e.currentTarget.style.transform = 'translateY(-3px)';
-                    e.currentTarget.style.boxShadow = '0 10px 30px rgba(255, 107, 157, 0.4)';
-                  }
+                  if (!uploading) e.currentTarget.style.background = '#4a6849';
                 }}
                 onMouseOut={(e) => {
-                  e.currentTarget.style.transform = 'translateY(0)';
-                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(255, 107, 157, 0.3)';
+                  if (!uploading) e.currentTarget.style.background = '#5c7a5a';
                 }}
               >
-                {uploading ? '⏳ Uploading...' : editingId ? '💾 Update Listing' : '🎉 Post Listing'}
+                {uploading ? 'Uploading...' : editingId ? 'Update Listing' : 'Post Listing'}
               </button>
             </form>
           </div>
         </div>
       )}
 
-      {/* Listings Grid */}
+      {/* Main Content Area */}
       <div style={{
         maxWidth: '1400px',
-        margin: '2rem auto',
+        margin: '1.5rem auto',
         padding: '0 2rem 4rem'
       }}>
-        {loading ? (
+        {/* Purchases View */}
+        {showPurchases ? (
+          <div>
+            <h2 style={{ color: '#2d2d2d', fontSize: '1.3rem', fontWeight: '600', marginBottom: '1.2rem' }}>
+              My Purchases
+            </h2>
+            {purchases.length === 0 ? (
+              <div style={{
+                textAlign: 'center',
+                padding: '4rem 2rem',
+                color: '#9a958e'
+              }}>
+                <ShoppingBag size={48} style={{ marginBottom: '1rem', opacity: 0.4 }} />
+                <p style={{ fontSize: '1rem', margin: 0 }}>No purchases yet.</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                {purchases.map(purchase => {
+                  const listing = listings.find(l => l.id === purchase.listingId);
+                  return (
+                    <div key={purchase.id} style={{
+                      background: 'white',
+                      borderRadius: '14px',
+                      border: '1px solid #e0dbd4',
+                      padding: '1.2rem',
+                      display: 'flex',
+                      gap: '1.2rem',
+                      alignItems: 'center',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.06)'
+                    }}>
+                      {listing?.image && (
+                        <img src={listing.image} alt={listing?.title || 'Item'} style={{
+                          width: '70px',
+                          height: '70px',
+                          objectFit: 'cover',
+                          borderRadius: '10px',
+                          flexShrink: 0
+                        }} />
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <h3 style={{ color: '#2d2d2d', fontSize: '1rem', fontWeight: '600', margin: '0 0 0.2rem 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {listing?.title || 'Item'}
+                        </h3>
+                        <p style={{ color: '#5c7a5a', fontSize: '1.1rem', fontWeight: '700', margin: 0 }}>
+                          &euro;{purchase.amount?.toFixed(2)}
+                        </p>
+                      </div>
+                      <div style={{ color: '#9a958e', fontSize: '0.85rem', textAlign: 'right', flexShrink: 0 }}>
+                        <div>{purchase.createdAt ? formatTimeAgo(purchase.createdAt) : 'Processing'}</div>
+                        <div style={{ color: '#5c7a5a', fontWeight: '500', marginTop: '0.2rem' }}>Completed</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : loading ? (
           <div style={{
             textAlign: 'center',
             padding: '4rem 2rem',
-            color: '#ff6b9d',
-            fontSize: '1.5rem',
-            fontWeight: '600'
+            color: '#9a958e'
           }}>
-            <div style={{ fontSize: '4rem', marginBottom: '1rem', animation: 'bounce 1s infinite' }}>🎠</div>
-            Loading listings...
+            <div style={{
+              width: '40px',
+              height: '40px',
+              border: '3px solid #e0dbd4',
+              borderTopColor: '#5c7a5a',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+              margin: '0 auto 1rem'
+            }} />
+            <span style={{ fontSize: '1rem' }}>Loading listings...</span>
           </div>
         ) : (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
-            gap: '2rem'
-          }}>
-            {filteredListings.map((item, index) => (
-              <div
-                key={item.id}
-                onClick={() => setSelectedItem(item)}
-                style={{
-                  background: 'white',
-                  borderRadius: '25px',
-                  overflow: 'hidden',
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.1)',
-                  transition: 'all 0.3s ease',
-                  cursor: 'pointer',
-                  border: '3px solid transparent',
-                  animation: `fadeInUp 0.5s ease ${index * 0.1}s backwards`
-                }}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-10px)';
-                  e.currentTarget.style.boxShadow = '0 16px 40px rgba(255, 107, 157, 0.3)';
-                  e.currentTarget.style.borderColor = '#ffa06b';
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.transform = 'translateY(0)';
-                  e.currentTarget.style.boxShadow = '0 8px 24px rgba(0,0,0,0.1)';
-                  e.currentTarget.style.borderColor = 'transparent';
-                }}
-              >
-                <div style={{ position: 'relative' }}>
-                  <img
-                    src={item.image}
-                    alt={item.title}
-                    style={{
-                      width: '100%',
-                      height: '250px',
-                      objectFit: 'cover'
-                    }}
-                  />
-                  {item.status === 'sold' && (
-                    <div style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      background: 'rgba(0,0,0,0.5)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center'
-                    }}>
-                      <span style={{
-                        background: '#f44336',
-                        color: 'white',
-                        padding: '0.8rem 2rem',
-                        borderRadius: '50px',
-                        fontSize: '1.5rem',
-                        fontWeight: '800',
-                        letterSpacing: '2px',
-                        transform: 'rotate(-15deg)'
-                      }}>
-                        SOLD
-                      </span>
-                    </div>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleSave(item.id);
-                    }}
-                    style={{
-                      position: 'absolute',
-                      top: '1rem',
-                      right: '1rem',
-                      background: 'white',
-                      border: 'none',
-                      borderRadius: '50%',
-                      width: '45px',
-                      height: '45px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                      transition: 'all 0.3s ease'
-                    }}
-                    onMouseOver={(e) => {
-                      e.currentTarget.style.transform = 'scale(1.1)';
-                    }}
-                    onMouseOut={(e) => {
-                      e.currentTarget.style.transform = 'scale(1)';
-                    }}
-                  >
-                    <Heart
-                      size={22}
-                      fill={item.saved ? '#ff6b9d' : 'none'}
-                      color={item.saved ? '#ff6b9d' : '#666'}
+          <>
+            {showMyListings && (
+              <h2 style={{ color: '#2d2d2d', fontSize: '1.3rem', fontWeight: '600', marginBottom: '1.2rem' }}>
+                My Listings
+              </h2>
+            )}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+              gap: '1.5rem'
+            }}>
+              {filteredListings.map((item, index) => (
+                <div
+                  key={item.id}
+                  onClick={() => setSelectedItem(item)}
+                  style={{
+                    background: 'white',
+                    borderRadius: '14px',
+                    overflow: 'hidden',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+                    transition: 'all 0.2s ease',
+                    cursor: 'pointer',
+                    border: '1px solid #e0dbd4',
+                    animation: `fadeInUp 0.4s ease ${index * 0.05}s backwards`
+                  }}
+                  onMouseOver={(e) => {
+                    e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.12)';
+                    e.currentTarget.style.borderColor = '#c4956a';
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.08)';
+                    e.currentTarget.style.borderColor = '#e0dbd4';
+                  }}
+                >
+                  <div style={{ position: 'relative' }}>
+                    <img
+                      src={item.image}
+                      alt={item.title}
+                      style={{
+                        width: '100%',
+                        height: '220px',
+                        objectFit: 'cover'
+                      }}
                     />
-                  </button>
-                  <div style={{
-                    position: 'absolute',
-                    bottom: '1rem',
-                    left: '1rem',
-                    background: 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
-                    color: 'white',
-                    padding: '0.5rem 1rem',
-                    borderRadius: '20px',
-                    fontSize: '0.9rem',
-                    fontWeight: '600',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.3rem'
-                  }}>
-                    <Tag size={16} />
-                    {item.condition}
-                  </div>
-                </div>
-                <div style={{ padding: '1.5rem' }}>
-                  <h3 style={{
-                    color: '#333',
-                    fontSize: '1.3rem',
-                    fontWeight: '700',
-                    marginBottom: '0.5rem',
-                    lineHeight: '1.3'
-                  }}>
-                    {item.title}
-                  </h3>
-                  <div style={{
-                    fontSize: '2rem',
-                    fontWeight: '800',
-                    color: '#ff6b9d',
-                    marginBottom: '1rem'
-                  }}>
-                    ${typeof item.price === 'number' ? item.price.toFixed(2) : item.price}
-                  </div>
-                  <div style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '0.5rem',
-                    fontSize: '0.95rem',
-                    color: '#666'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span>👶</span>
-                      <span>{item.age}</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <MapPin size={16} />
-                      <span>{item.location}</span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <Clock size={16} />
-                      <span>{formatTimeAgo(item.createdAt)}</span>
-                    </div>
-                  </div>
-                  <div style={{
-                    marginTop: '1rem',
-                    paddingTop: '1rem',
-                    borderTop: '2px solid #f0f0f0',
-                    fontSize: '0.9rem',
-                    color: '#999',
-                    fontWeight: '600',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}>
-                    <span>Seller: {item.seller?.split('@')[0]}</span>
-                    {user && item.sellerId === user.uid && (
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleEdit(item);
-                          }}
-                          style={{
-                            background: '#4CAF50',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '50%',
-                            width: '35px',
-                            height: '35px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s'
-                          }}
-                          title="Edit listing"
-                        >
-                          <Edit2 size={16} />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDelete(item.id);
-                          }}
-                          style={{
-                            background: '#f44336',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '50%',
-                            width: '35px',
-                            height: '35px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s'
-                          }}
-                          title="Delete listing"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                    {item.status === 'sold' && (
+                      <div style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: 'rgba(0,0,0,0.45)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}>
+                        <span style={{
+                          background: '#c45c5c',
+                          color: 'white',
+                          padding: '0.5rem 1.5rem',
+                          borderRadius: '8px',
+                          fontSize: '1rem',
+                          fontWeight: '700',
+                          letterSpacing: '2px',
+                          transform: 'rotate(-8deg)'
+                        }}>
+                          SOLD
+                        </span>
                       </div>
                     )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSave(item.id);
+                      }}
+                      style={{
+                        position: 'absolute',
+                        top: '0.8rem',
+                        right: '0.8rem',
+                        background: 'white',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: '36px',
+                        height: '36px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
+                        transition: 'transform 0.2s'
+                      }}
+                      onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                      onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                    >
+                      <Heart
+                        size={18}
+                        fill={item.saved ? '#c45c5c' : 'none'}
+                        color={item.saved ? '#c45c5c' : '#6b6b6b'}
+                      />
+                    </button>
+                    <div style={{
+                      position: 'absolute',
+                      bottom: '0.8rem',
+                      left: '0.8rem',
+                      background: '#f5f0eb',
+                      color: '#6b6b6b',
+                      padding: '0.3rem 0.8rem',
+                      borderRadius: '8px',
+                      fontSize: '0.8rem',
+                      fontWeight: '500',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.3rem'
+                    }}>
+                      <Tag size={13} />
+                      {item.condition}
+                    </div>
+                  </div>
+                  <div style={{ padding: '1.2rem' }}>
+                    <h3 style={{
+                      color: '#2d2d2d',
+                      fontSize: '1.1rem',
+                      fontWeight: '600',
+                      marginBottom: '0.3rem',
+                      lineHeight: '1.3'
+                    }}>
+                      {item.title}
+                    </h3>
+                    <div style={{
+                      fontSize: '1.4rem',
+                      fontWeight: '700',
+                      color: '#5c7a5a',
+                      marginBottom: '0.8rem'
+                    }}>
+                      &euro;{typeof item.price === 'number' ? item.price.toFixed(2) : item.price}
+                    </div>
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.3rem',
+                      fontSize: '0.85rem',
+                      color: '#6b6b6b'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <span style={{ fontSize: '0.85rem' }}>Age: {item.age}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <MapPin size={14} />
+                        <span>{item.location}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Clock size={14} />
+                        <span>{formatTimeAgo(item.createdAt)}</span>
+                      </div>
+                    </div>
+                    <div style={{
+                      marginTop: '0.8rem',
+                      paddingTop: '0.8rem',
+                      borderTop: '1px solid #f0ece6',
+                      fontSize: '0.85rem',
+                      color: '#9a958e',
+                      fontWeight: '500',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <span>Seller: {displaySellerName(item)}</span>
+                      {user && item.sellerId === user.uid && (
+                        <div style={{ display: 'flex', gap: '0.4rem' }}>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEdit(item);
+                            }}
+                            style={{
+                              background: '#5c7a5a',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '8px',
+                              width: '30px',
+                              height: '30px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                              transition: 'background 0.2s'
+                            }}
+                            title="Edit listing"
+                            onMouseOver={(e) => e.currentTarget.style.background = '#4a6849'}
+                            onMouseOut={(e) => e.currentTarget.style.background = '#5c7a5a'}
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDelete(item.id);
+                            }}
+                            style={{
+                              background: '#c45c5c',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '8px',
+                              width: '30px',
+                              height: '30px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                              transition: 'background 0.2s'
+                            }}
+                            title="Delete listing"
+                            onMouseOver={(e) => e.currentTarget.style.background = '#a84a4a'}
+                            onMouseOut={(e) => e.currentTarget.style.background = '#c45c5c'}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
 
-        {!loading && filteredListings.length === 0 && (
-          <div style={{
-            textAlign: 'center',
-            padding: '4rem 2rem',
-            color: '#ff6b9d',
-            fontSize: '1.5rem',
-            fontWeight: '600'
-          }}>
-            <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🔍</div>
-            No items found. Try a different search or category!
-          </div>
+            {filteredListings.length === 0 && (
+              <div style={{
+                textAlign: 'center',
+                padding: '4rem 2rem',
+                color: '#9a958e'
+              }}>
+                <Search size={48} style={{ marginBottom: '1rem', opacity: 0.3 }} />
+                <p style={{ fontSize: '1rem', margin: 0 }}>
+                  {showMyListings ? 'You haven\'t listed any items yet.' : 'No items found. Try a different search or category.'}
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -1256,27 +1443,27 @@ const KidsMarketplace = () => {
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0,0,0,0.5)',
+            background: 'rgba(0,0,0,0.4)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             zIndex: 200,
             padding: '2rem',
-            animation: 'fadeIn 0.3s ease'
+            animation: 'fadeIn 0.2s ease'
           }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
               background: 'white',
-              borderRadius: '30px',
-              maxWidth: '700px',
+              borderRadius: '14px',
+              maxWidth: '650px',
               width: '100%',
               maxHeight: '90vh',
               overflowY: 'auto',
-              boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-              border: '4px solid #ffa06b',
-              animation: 'slideDown 0.4s ease',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+              border: '1px solid #e0dbd4',
+              animation: 'slideDown 0.3s ease',
               position: 'relative'
             }}
           >
@@ -1284,22 +1471,22 @@ const KidsMarketplace = () => {
               onClick={() => setSelectedItem(null)}
               style={{
                 position: 'absolute',
-                top: '1rem',
-                right: '1rem',
+                top: '0.8rem',
+                right: '0.8rem',
                 background: 'white',
                 border: 'none',
                 borderRadius: '50%',
-                width: '40px',
-                height: '40px',
+                width: '36px',
+                height: '36px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: 'pointer',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
                 zIndex: 10
               }}
             >
-              <X size={20} color="#666" />
+              <X size={18} color="#6b6b6b" />
             </button>
 
             <img
@@ -1307,24 +1494,24 @@ const KidsMarketplace = () => {
               alt={selectedItem.title}
               style={{
                 width: '100%',
-                height: '350px',
+                height: '320px',
                 objectFit: 'cover',
-                borderRadius: '26px 26px 0 0'
+                borderRadius: '13px 13px 0 0'
               }}
             />
 
-            <div style={{ padding: '2rem' }}>
+            <div style={{ padding: '1.5rem' }}>
               <div style={{
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'flex-start',
-                marginBottom: '1rem',
+                marginBottom: '0.8rem',
                 flexWrap: 'wrap',
-                gap: '1rem'
+                gap: '0.8rem'
               }}>
                 <h2 style={{
-                  color: '#333',
-                  fontSize: '1.8rem',
+                  color: '#2d2d2d',
+                  fontSize: '1.5rem',
                   fontWeight: '700',
                   margin: 0,
                   lineHeight: '1.3'
@@ -1332,42 +1519,42 @@ const KidsMarketplace = () => {
                   {selectedItem.title}
                 </h2>
                 <div style={{
-                  fontSize: '2.2rem',
-                  fontWeight: '800',
-                  color: '#ff6b9d',
+                  fontSize: '1.8rem',
+                  fontWeight: '700',
+                  color: '#5c7a5a',
                   whiteSpace: 'nowrap'
                 }}>
-                  ${typeof selectedItem.price === 'number' ? selectedItem.price.toFixed(2) : selectedItem.price}
+                  &euro;{typeof selectedItem.price === 'number' ? selectedItem.price.toFixed(2) : selectedItem.price}
                 </div>
               </div>
 
               <div style={{
                 display: 'flex',
-                gap: '0.8rem',
+                gap: '0.5rem',
                 flexWrap: 'wrap',
-                marginBottom: '1.5rem'
+                marginBottom: '1.2rem'
               }}>
                 <span style={{
-                  background: 'linear-gradient(135deg, #ff6b9d 0%, #ffa06b 100%)',
+                  background: '#5c7a5a',
                   color: 'white',
-                  padding: '0.4rem 1rem',
-                  borderRadius: '20px',
-                  fontSize: '0.9rem',
-                  fontWeight: '600',
+                  padding: '0.3rem 0.8rem',
+                  borderRadius: '8px',
+                  fontSize: '0.8rem',
+                  fontWeight: '500',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '0.3rem'
                 }}>
-                  <Tag size={14} />
+                  <Tag size={13} />
                   {selectedItem.condition}
                 </span>
                 <span style={{
-                  background: '#fff0f5',
-                  color: '#ff6b9d',
-                  padding: '0.4rem 1rem',
-                  borderRadius: '20px',
-                  fontSize: '0.9rem',
-                  fontWeight: '600'
+                  background: '#f5f0eb',
+                  color: '#6b6b6b',
+                  padding: '0.3rem 0.8rem',
+                  borderRadius: '8px',
+                  fontSize: '0.8rem',
+                  fontWeight: '500'
                 }}>
                   {selectedItem.category?.charAt(0).toUpperCase() + selectedItem.category?.slice(1)}
                 </span>
@@ -1376,75 +1563,63 @@ const KidsMarketplace = () => {
               <div style={{
                 display: 'grid',
                 gridTemplateColumns: '1fr 1fr',
-                gap: '1rem',
-                marginBottom: '1.5rem'
+                gap: '0.8rem',
+                marginBottom: '1.2rem'
               }}>
                 <div style={{
-                  background: '#fff8f0',
-                  padding: '1rem',
-                  borderRadius: '15px',
+                  background: '#f5f0eb',
+                  padding: '0.8rem',
+                  borderRadius: '10px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.8rem'
+                  gap: '0.6rem'
                 }}>
-                  <span style={{ fontSize: '1.5rem' }}>👶</span>
-                  <div>
-                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Age Range</div>
-                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.age}</div>
-                  </div>
+                  <span style={{ fontSize: '1rem', color: '#6b6b6b' }}>Age</span>
+                  <div style={{ color: '#2d2d2d', fontWeight: '600', fontSize: '0.9rem' }}>{selectedItem.age}</div>
                 </div>
                 <div style={{
-                  background: '#fff8f0',
-                  padding: '1rem',
-                  borderRadius: '15px',
+                  background: '#f5f0eb',
+                  padding: '0.8rem',
+                  borderRadius: '10px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.8rem'
+                  gap: '0.6rem'
                 }}>
-                  <MapPin size={20} color="#ff6b9d" />
-                  <div>
-                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Location</div>
-                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.location}</div>
-                  </div>
+                  <MapPin size={16} color="#6b6b6b" />
+                  <div style={{ color: '#2d2d2d', fontWeight: '600', fontSize: '0.9rem' }}>{selectedItem.location}</div>
                 </div>
                 <div style={{
-                  background: '#fff8f0',
-                  padding: '1rem',
-                  borderRadius: '15px',
+                  background: '#f5f0eb',
+                  padding: '0.8rem',
+                  borderRadius: '10px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.8rem'
+                  gap: '0.6rem'
                 }}>
-                  <Clock size={20} color="#ff6b9d" />
-                  <div>
-                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Listed</div>
-                    <div style={{ color: '#333', fontWeight: '600' }}>{formatTimeAgo(selectedItem.createdAt)}</div>
-                  </div>
+                  <Clock size={16} color="#6b6b6b" />
+                  <div style={{ color: '#2d2d2d', fontWeight: '600', fontSize: '0.9rem' }}>{formatTimeAgo(selectedItem.createdAt)}</div>
                 </div>
                 <div style={{
-                  background: '#fff8f0',
-                  padding: '1rem',
-                  borderRadius: '15px',
+                  background: '#f5f0eb',
+                  padding: '0.8rem',
+                  borderRadius: '10px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '0.8rem'
+                  gap: '0.6rem'
                 }}>
-                  <User size={20} color="#ff6b9d" />
-                  <div>
-                    <div style={{ fontSize: '0.8rem', color: '#999', fontWeight: '600' }}>Seller</div>
-                    <div style={{ color: '#333', fontWeight: '600' }}>{selectedItem.seller?.split('@')[0]}</div>
-                  </div>
+                  <User size={16} color="#6b6b6b" />
+                  <div style={{ color: '#2d2d2d', fontWeight: '600', fontSize: '0.9rem' }}>{displaySellerName(selectedItem)}</div>
                 </div>
               </div>
 
               {selectedItem.description && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <h3 style={{ color: '#ff6b9d', fontSize: '1.1rem', fontWeight: '700', marginBottom: '0.5rem' }}>
+                <div style={{ marginBottom: '1.2rem' }}>
+                  <h3 style={{ color: '#2d2d2d', fontSize: '0.95rem', fontWeight: '600', marginBottom: '0.4rem' }}>
                     Description
                   </h3>
                   <p style={{
-                    color: '#555',
-                    fontSize: '1rem',
+                    color: '#6b6b6b',
+                    fontSize: '0.9rem',
                     lineHeight: '1.6',
                     margin: 0
                   }}>
@@ -1453,42 +1628,40 @@ const KidsMarketplace = () => {
                 </div>
               )}
 
-              {/* Buy Now Button - shown when user is NOT the seller and item is NOT sold */}
+              {/* Buy Now Button */}
               {user && selectedItem.sellerId !== user.uid && selectedItem.status !== 'sold' && (
                 <div style={{
-                  borderTop: '2px solid #f0f0f0',
-                  paddingTop: '1.5rem',
-                  marginTop: '1rem'
+                  borderTop: '1px solid #f0ece6',
+                  paddingTop: '1.2rem',
+                  marginTop: '0.5rem'
                 }}>
                   <button
                     onClick={() => handleBuyNow(selectedItem)}
                     disabled={buyLoading}
                     style={{
                       width: '100%',
-                      background: buyLoading
-                        ? '#ccc'
-                        : 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)',
+                      background: buyLoading ? '#9a958e' : '#5c7a5a',
                       color: 'white',
                       border: 'none',
-                      borderRadius: '50px',
-                      padding: '1.2rem 2rem',
-                      fontSize: '1.3rem',
-                      fontWeight: '700',
+                      borderRadius: '10px',
+                      padding: '1rem',
+                      fontSize: '1.1rem',
+                      fontWeight: '600',
                       cursor: buyLoading ? 'not-allowed' : 'pointer',
-                      boxShadow: '0 6px 20px rgba(76, 175, 80, 0.3)',
-                      transition: 'all 0.3s ease',
-                      fontFamily: 'inherit',
+                      transition: 'background 0.2s',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      gap: '0.5rem'
+                      gap: '0.4rem'
                     }}
                     onMouseOver={(e) => {
-                      if (!buyLoading) e.currentTarget.style.transform = 'translateY(-2px)';
+                      if (!buyLoading) e.currentTarget.style.background = '#4a6849';
                     }}
-                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                    onMouseOut={(e) => {
+                      if (!buyLoading) e.currentTarget.style.background = '#5c7a5a';
+                    }}
                   >
-                    {buyLoading ? '⏳ Preparing checkout...' : '💳 Buy Now'}
+                    {buyLoading ? 'Preparing checkout...' : 'Buy Now'}
                   </button>
                 </div>
               )}
@@ -1496,30 +1669,32 @@ const KidsMarketplace = () => {
               {/* Sold Badge */}
               {selectedItem.status === 'sold' && (
                 <div style={{
-                  borderTop: '2px solid #f0f0f0',
-                  paddingTop: '1.5rem',
-                  marginTop: '1rem',
+                  borderTop: '1px solid #f0ece6',
+                  paddingTop: '1.2rem',
+                  marginTop: '0.5rem',
                   textAlign: 'center'
                 }}>
                   <div style={{
-                    background: '#f0f0f0',
-                    color: '#999',
-                    padding: '1rem',
-                    borderRadius: '50px',
-                    fontSize: '1.2rem',
-                    fontWeight: '700'
+                    background: '#f5f0eb',
+                    color: '#9a958e',
+                    padding: '0.8rem',
+                    borderRadius: '10px',
+                    fontSize: '1rem',
+                    fontWeight: '600'
                   }}>
-                    ✅ This item has been sold
+                    This item has been sold
                   </div>
                 </div>
               )}
 
-              {user && selectedItem.sellerId === user.uid && (
+              {/* Owner Actions */}
+              {user && selectedItem.sellerId === user.uid && selectedItem.status !== 'sold' && (
                 <div style={{
                   display: 'flex',
-                  gap: '1rem',
-                  borderTop: '2px solid #f0f0f0',
-                  paddingTop: '1.5rem'
+                  gap: '0.8rem',
+                  borderTop: '1px solid #f0ece6',
+                  paddingTop: '1.2rem',
+                  marginTop: '0.5rem'
                 }}>
                   <button
                     onClick={() => {
@@ -1528,25 +1703,24 @@ const KidsMarketplace = () => {
                     }}
                     style={{
                       flex: 1,
-                      background: '#4CAF50',
+                      background: '#5c7a5a',
                       color: 'white',
                       border: 'none',
-                      borderRadius: '50px',
-                      padding: '1rem',
-                      fontSize: '1.1rem',
+                      borderRadius: '10px',
+                      padding: '0.8rem',
+                      fontSize: '0.95rem',
                       fontWeight: '600',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      gap: '0.5rem',
-                      fontFamily: 'inherit',
-                      transition: 'all 0.2s'
+                      gap: '0.4rem',
+                      transition: 'background 0.2s'
                     }}
-                    onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                    onMouseOver={(e) => e.currentTarget.style.background = '#4a6849'}
+                    onMouseOut={(e) => e.currentTarget.style.background = '#5c7a5a'}
                   >
-                    <Edit2 size={18} />
+                    <Edit2 size={16} />
                     Edit
                   </button>
                   <button
@@ -1556,25 +1730,24 @@ const KidsMarketplace = () => {
                     }}
                     style={{
                       flex: 1,
-                      background: '#f44336',
+                      background: '#c45c5c',
                       color: 'white',
                       border: 'none',
-                      borderRadius: '50px',
-                      padding: '1rem',
-                      fontSize: '1.1rem',
+                      borderRadius: '10px',
+                      padding: '0.8rem',
+                      fontSize: '0.95rem',
                       fontWeight: '600',
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      gap: '0.5rem',
-                      fontFamily: 'inherit',
-                      transition: 'all 0.2s'
+                      gap: '0.4rem',
+                      transition: 'background 0.2s'
                     }}
-                    onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                    onMouseOver={(e) => e.currentTarget.style.background = '#a84a4a'}
+                    onMouseOut={(e) => e.currentTarget.style.background = '#c45c5c'}
                   >
-                    <Trash2 size={18} />
+                    <Trash2 size={16} />
                     Delete
                   </button>
                 </div>
@@ -1585,28 +1758,23 @@ const KidsMarketplace = () => {
       )}
 
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap');
-        
-        @keyframes bounce {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-10px); }
-        }
-        
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+
         @keyframes fadeInUp {
           from {
             opacity: 0;
-            transform: translateY(30px);
+            transform: translateY(15px);
           }
           to {
             opacity: 1;
             transform: translateY(0);
           }
         }
-        
+
         @keyframes slideDown {
           from {
             opacity: 0;
-            transform: translateY(-30px);
+            transform: translateY(-15px);
           }
           to {
             opacity: 1;
@@ -1619,8 +1787,17 @@ const KidsMarketplace = () => {
           to { opacity: 1; }
         }
 
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
         * {
           box-sizing: border-box;
+        }
+
+        input, select, textarea, button {
+          font-family: inherit;
         }
       `}</style>
     </div>
