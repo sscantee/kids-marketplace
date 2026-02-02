@@ -81,6 +81,7 @@ const KidsMarketplace = () => {
   const [selectedItem, setSelectedItem] = useState(null);
   const [buyLoading, setBuyLoading] = useState(false);
   const [paymentMessage, setPaymentMessage] = useState(null);
+  const [seeding, setSeeding] = useState(false);
 
   const categories = [
     { id: 'all', label: 'All Items' },
@@ -323,6 +324,25 @@ const KidsMarketplace = () => {
       alert(error.message || 'Failed to start checkout. Please try again.');
     } finally {
       setBuyLoading(false);
+    }
+  };
+
+  const handleSeedData = async () => {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const seedListings = httpsCallable(functions, 'seedListings');
+      const result = await seedListings();
+      if (result.data.success) {
+        setPaymentMessage({ type: 'success', text: `${result.data.count} sample products added!` });
+      } else {
+        setPaymentMessage({ type: 'cancelled', text: result.data.message || 'Could not add sample data.' });
+      }
+    } catch (error) {
+      console.error('Error seeding data:', error);
+      alert('Error adding sample products. Make sure Cloud Functions are deployed.');
+    } finally {
+      setSeeding(false);
     }
   };
 
@@ -602,6 +622,28 @@ const KidsMarketplace = () => {
                 <ShoppingBag size={14} />
                 Purchases
               </button>
+              {listings.length < 5 && (
+                <button
+                  onClick={handleSeedData}
+                  disabled={seeding}
+                  style={{
+                    background: 'white',
+                    color: '#c4956a',
+                    border: '1px solid #e0dbd4',
+                    borderRadius: '10px',
+                    padding: '0.6rem 1rem',
+                    fontSize: '0.85rem',
+                    fontWeight: '500',
+                    cursor: seeding ? 'not-allowed' : 'pointer',
+                    transition: 'border-color 0.2s',
+                    opacity: seeding ? 0.6 : 1
+                  }}
+                  onMouseOver={(e) => e.currentTarget.style.borderColor = '#c4956a'}
+                  onMouseOut={(e) => e.currentTarget.style.borderColor = '#e0dbd4'}
+                >
+                  {seeding ? 'Adding...' : 'Add Sample Data'}
+                </button>
+              )}
               <button
                 onClick={() => { setShowAddForm(!showAddForm); setShowPurchases(false); }}
                 style={{
